@@ -1,0 +1,3 @@
+{"run_id":"lab5-4-0d4dee33","t":0.001,"kind":"review.start","base":null,"head":"HEAD","files":2,"diff_bytes":609}
+{"run_id":"lab5-4-0d4dee33","t":0.856,"kind":"claude.headless","cost_usd":0.09,"turns":3,"budget":"1 calls, $0.0900 of $0.50"}
+{"run_id":"lab5-4-0d4dee33","t":0.858,"kind":"review.done","kept":2,"dropped":0,"exit_code":2,"cost_usd":0.09}
