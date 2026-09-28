@@ -1,0 +1,242 @@
+# Lab 5.4 - PR review that also proposes ONE fix, applied only by a maintainer's comment.
+#
+#   propose-fix         same trust shape as day4.yml's pr-review: the BASE branch's
+#                       review-fix.mjs reads the PR as data                            (gateway key)
+#   comment-fix         posts review.md (the only write token for this half)
+#   apply-fix-command   on: issue_comment - a maintainer replies /apply-fix or /ignore-fix.
+#                       Runs the BASE branch's apply-fix.mjs against the PR's CURRENT head.
+#                       No model, no gateway key - it only re-verifies and writes.        (push token)
+#
+# This workflow does not replace day4.yml's pr-review/gate - it runs alongside it. A verified
+# blocker from EITHER reviewer still fails day4.yml's gate; this workflow only adds the
+# apply-a-fix path on top.
+#
+# Trust boundary, stated precisely (same shape as day4.yml, extended for issue_comment):
+#   * Fork PRs get no secrets and a read-only GITHUB_TOKEN. propose-fix does not run for them;
+#     a maintainer runs review-fix.mjs on a trusted branch instead.
+#   * propose-fix runs review-fix.mjs from the BASE branch; the PR's own copy never runs.
+#   * apply-fix-command is the first `issue_comment` trigger in this repo. issue_comment runs
+#     with the BASE branch's default workflow permissions and secrets regardless of who commented
+#     or what repo the PR is from - unlike `pull_request`, checking out a PR branch here does NOT
+#     run any of the PR's code, because the only script that runs is apply-fix.mjs, checked out
+#     from the trusted base branch, and the PR's file content is used only as data to match
+#     fix.old_snippet against. The gate is: (a) the comment is on a PR, (b) the comment body
+#     matches /apply-fix or /ignore-fix at the start of a line, (c) the commenter's
+#     author_association (already on the issue_comment payload - no extra API call) is
+#     OWNER, MEMBER, or COLLABORATOR. Anyone else's comment is ignored. A fork PR's branch is
+#     never pushable by GITHUB_TOKEN, so /apply-fix on a fork PR fails closed at the push step -
+#     a maintainer applies it from a trusted checkout instead, same stance as day4.yml's forks.
+name: lab5-4-pr-fix
+
+on:
+  pull_request:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab54-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  D4: day4-orchestration-evals-cicd
+  SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      day4: ${{ steps.diff.outputs.day4 }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          files=$(git diff --name-only "origin/$BASE_REF...HEAD")
+          echo "$files" | grep -qE "^($D4/|\.github/workflows/abhiThikKarkeDetaHu\.yml)" && d=true || d=false
+          echo "day4=$d" >> "$GITHUB_OUTPUT"
+
+  propose-fix:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.day4 == 'true' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_BASE_URL: ${{ secrets.LAB_GATEWAY_URL }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.LAB_GATEWAY_KEY }}
+      REVIEW_BUDGET_USD: "0.50"
+    steps:
+      - name: Gateway secret present?
+        run: |
+          [ -n "$ANTHROPIC_AUTH_TOKEN" ] && exit 0
+          echo "::error::LAB_GATEWAY_KEY is not set - the review cannot run, so this check fails (fail closed)"; exit 1
+      - name: The reviewer comes from the base branch (trusted)
+        uses: actions/checkout@v4
+        with:
+          {
+            ref: "${{ github.base_ref }}",
+            path: trusted,
+            persist-credentials: false,
+          }
+      - name: The PR is data
+        uses: actions/checkout@v4
+        with: { path: pr, fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: "24" }
+      - name: Install Claude Code (pinned)
+        run: npm install -g @anthropic-ai/claude-code@2.1.282
+      - name: Review + propose a fix (exit 0 ok, 2 blocking findings, 1 could not review)
+        id: review
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p fix-out
+          echo "$PR_NUMBER" > fix-out/pr-number
+          echo "$PR_HEAD_SHA" > fix-out/head-sha
+          REVIEWER="trusted/$D4/lab5-4-pr-fix/review-fix.mjs"
+          if [ ! -f "$REVIEWER" ]; then
+            echo "::notice::the base branch has no fix-proposer yet (bootstrap PR) - not reviewed"; exit 0
+          fi
+          cd pr
+          set +e
+          node "../$REVIEWER" --repo . --base "origin/$BASE_REF" --head HEAD --out ../fix-out --ci
+          code=$?
+          cd ..
+          echo "$code" > fix-out/exit-code
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: pr-fix, path: fix-out/, retention-days: 14 }
+
+  comment-fix:
+    needs: propose-fix
+    if: always() && needs.propose-fix.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # the only write token in this job - and it never checks out PR code
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: pr-fix, path: fix-out }
+      - name: Post the review + proposed fix (the model never posts - this step does)
+        if: hashFiles('fix-out/review.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body-file fix-out/review.md
+
+  apply-fix-command:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Is this a /apply-fix or /ignore-fix from someone trusted, on a PR?
+        id: gate
+        env:
+          BODY: ${{ github.event.comment.body }}
+          ASSOC: ${{ github.event.comment.author_association }}
+        run: |
+          cmd=""
+          echo "$BODY" | grep -qE '(^|[[:space:]])/apply-fix([[:space:]]|$)' && cmd="apply"
+          [ -z "$cmd" ] && { echo "$BODY" | grep -qE '(^|[[:space:]])/ignore-fix([[:space:]]|$)' && cmd="ignore"; }
+          if [ -z "$cmd" ]; then echo "::notice::not an apply-fix/ignore-fix command - ignoring"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          case "$ASSOC" in
+            OWNER|MEMBER|COLLABORATOR) ;;
+            *) echo "::warning::$ASSOC is not a trusted association - ignoring $cmd"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Find the PR and its current head
+        if: steps.gate.outputs.run == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName,headRepositoryOwner,headRepository,headRefOid)
+          echo "head_ref=$(echo "$info" | jq -r .headRefName)" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(echo "$info" | jq -r .headRefOid)" >> "$GITHUB_OUTPUT"
+          echo "head_owner=$(echo "$info" | jq -r .headRepositoryOwner.login)" >> "$GITHUB_OUTPUT"
+
+      - name: The trusted apply-fix.mjs (base branch)
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with: { path: trusted, persist-credentials: false }
+
+      - name: The PR's current head, with a push-capable token
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: pr
+          ref: ${{ steps.pr.outputs.head_ref }}
+          repository: ${{ github.repository }} # a fork's ref is never here: the checkout fails closed below
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with: { node-version: "24" }
+
+      - name: Find the proposal for this PR's CURRENT head sha
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply'
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          run_id=$(gh run list --repo "$REPO" --workflow=abhiThikKarkeDetaHu.yml \
+            --json databaseId,headSha,event -q "[.[] | select(.headSha == \"$HEAD_SHA\" and .event == \"pull_request\")][0].databaseId")
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "::error::no fix proposal found for the PR's current head ($HEAD_SHA) - the PR moved since the last review; ask for a fresh one"
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          gh run download "$run_id" --repo "$REPO" -n pr-fix -D fix-out
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Apply (re-verifies old_snippet against the current file, then commits and pushes)
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply' && steps.find.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          if [ ! -s fix-out/review.json ] || ! jq -e '.fix' fix-out/review.json > /dev/null 2>&1; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "No verified fix in the last proposal - nothing to apply."
+            exit 0
+          fi
+          set +e
+          sha=$(node trusted/$D4/lab5-4-pr-fix/apply-fix.mjs --repo pr --fix fix-out/review.json \
+            --approver "$COMMENTER" --reason "/apply-fix on PR #$PR_NUMBER")
+          code=$?
+          set -e
+          if [ $code -ne 0 ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Could not apply the proposed fix: $sha"
+            exit 0
+          fi
+          git -C pr push origin "HEAD:$HEAD_REF"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Applied as $sha."
+
+      - name: /ignore-fix - acknowledge, no code changes
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'ignore'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Proposed fix dismissed - no code changes made."
