@@ -191,6 +191,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         with: { node-version: "20" }
 
+      - name: Git identity for the commit apply-fix.mjs makes
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply'
+        run: |
+          git -C pr config user.name "github-actions[bot]"
+          git -C pr config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Find the proposal for this PR's CURRENT head sha
         if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply'
         id: find
