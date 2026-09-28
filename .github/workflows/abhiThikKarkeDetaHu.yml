@@ -223,7 +223,7 @@ jobs:
           fi
           set +e
           sha=$(node trusted/$D4/lab5-4-pr-fix/apply-fix.mjs --repo pr --fix fix-out/review.json \
-            --approver "$COMMENTER" --reason "/apply-fix on PR #$PR_NUMBER")
+            --approver "$COMMENTER" --reason "/apply-fix on PR #$PR_NUMBER" 2>&1)
           code=$?
           set -e
           if [ $code -ne 0 ]; then
