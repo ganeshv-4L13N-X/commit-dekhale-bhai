@@ -59,7 +59,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           files=$(git diff --name-only "origin/$BASE_REF...HEAD")
-          echo "$files" | grep -qE "^($D4/|\.github/workflows/abhiThikKarkeDetaHu\.yml)" && d=true || d=false
+          echo "$files" | grep -qE "^($D4/|demoSite/|\.github/workflows/abhiThikKarkeDetaHu\.yml)" && d=true || d=false
           echo "day4=$d" >> "$GITHUB_OUTPUT"
 
   propose-fix:
