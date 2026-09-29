@@ -134,6 +134,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body-file fix-out/review.md
+      - name: Post a native suggestion for the proposed fix (best effort, alongside /apply-fix)
+        if: hashFiles('fix-out/review.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          jq -e ".fix and .fix.suggestion_line and .head_sha" fix-out/review.json > /dev/null 2>&1 \
+            || { echo "::notice::no suggestion line resolved - skipping (issue comment already posted)"; exit 0; }
+          commit_id=$(jq -r ".head_sha" fix-out/review.json)
+          path=$(jq -r ".fix.file" fix-out/review.json)
+          line=$(jq -r ".fix.suggestion_line" fix-out/review.json)
+          start_line=$(jq -r ".fix.suggestion_start_line // empty" fix-out/review.json)
+          explanation=$(jq -r ".fix.explanation" fix-out/review.json)
+          new_snippet=$(jq -r ".fix.new_snippet" fix-out/review.json)
+          fence="\`\`\`"
+          body=$(printf "%s\n\n%ssuggestion\n%s\n%s\n" "$explanation" "$fence" "$new_snippet" "$fence")
+          args=(-f "body=$body" -f "commit_id=$commit_id" -f "path=$path" -F "line=$line" -f "side=RIGHT")
+          if [ -n "$start_line" ]; then args+=(-F "start_line=$start_line" -f "start_side=RIGHT"); fi
+          gh api "repos/$REPO/pulls/$PR_NUMBER/comments" "${args[@]}" \
+            || echo "::warning::could not post the suggestion comment (non-fatal; the review comment above still covers it)"
 
   apply-fix-command:
     if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
@@ -191,6 +212,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         with: { node-version: "20" }
 
+      - name: Git identity for the commit apply-fix.mjs makes
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply'
+        run: |
+          git -C pr config user.name "github-actions[bot]"
+          git -C pr config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Find the proposal for this PR's CURRENT head sha
         if: steps.gate.outputs.run == 'true' && steps.gate.outputs.cmd == 'apply'
         id: find
@@ -223,7 +250,7 @@ jobs:
           fi
           set +e
           sha=$(node trusted/$D4/lab5-4-pr-fix/apply-fix.mjs --repo pr --fix fix-out/review.json \
-            --approver "$COMMENTER" --reason "/apply-fix on PR #$PR_NUMBER")
+            --approver "$COMMENTER" --reason "/apply-fix on PR #$PR_NUMBER" 2>&1)
           code=$?
           set -e
           if [ $code -ne 0 ]; then
