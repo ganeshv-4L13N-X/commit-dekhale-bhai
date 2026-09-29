@@ -1,5 +1,7 @@
 # "commit-dekhale-bhai" PR review that proposes ONE fix, applied only by a human
 
+## essayist way to run is change any file in demoSite with wrong code and create pr
+
 `review-fix.mjs` is Lab 5.3's `review.py` ported to Node, plus one more step:
 if the single most severe finding has a small, local fix, the model may
 propose it as an exact search-and-replace snippet. The snippet is never
