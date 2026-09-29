@@ -119,3 +119,18 @@ either pushes a new commit to the PR branch or acknowledges the dismissal.
 No job ever runs code *from* the PR - only the base branch's scripts,
 treating the PR's file content as data to match against, never as
 instructions.
+
+## The suggestion comment is a second, additive UI - not a replacement
+
+When a kept `fix`'s `old_snippet` aligns to whole lines in the file (checked
+by `snippetLineSpan`), `comment-fix` also posts a **GitHub-native review
+comment** on that diff line/range, with the fix's `new_snippet` inside a
+` ```suggestion ` fence. GitHub renders this with its own "Add suggestion to
+batch" / "Commit suggestion" button - no slash command needed for that quick
+path. This is best-effort and posted via `gh api repos/.../pulls/.../comments`
+(the only `gh api` call in this repo; `gh pr comment`/`gh pr review` have no
+line-anchored/suggestion support). If the snippet doesn't align to whole
+lines, this comment is silently skipped - the plain `review.md` issue comment
+and `/apply-fix`/`/ignore-fix` are unaffected either way and remain the only
+path that re-verifies against the PR's current head and records an
+approver/reason audit trail.

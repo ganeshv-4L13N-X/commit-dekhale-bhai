@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   changedLines, reviewableLines, secretFindings, redactDiff,
-  verify, verifyFix, decide,
+  verify, verifyFix, decide, snippetLineSpan,
 } from "./review-fix.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -372,6 +372,62 @@ test("verifyFix drops a fix for a file not changed in this PR", () => {
   const [kept, reason] = verifyFix(GOOD_FIX, ".", "HEAD", {}, [GOOD_FINDING]);
   assert.equal(kept, null);
   assert.match(reason, /not changed/);
+});
+
+// --------------------------------------------------------------- suggestion line span
+test("snippetLineSpan finds a single-line match at the start, middle, and end", () => {
+  assert.deepEqual(snippetLineSpan("a\nb\nc\n", "a"), { startLine: 1, endLine: 1 });
+  assert.deepEqual(snippetLineSpan("a\nb\nc\n", "b"), { startLine: 2, endLine: 2 });
+  assert.deepEqual(snippetLineSpan("a\nb\nc\n", "c"), { startLine: 3, endLine: 3 });
+  assert.deepEqual(snippetLineSpan("a\nb\nc", "c"), { startLine: 3, endLine: 3 }, "no trailing newline");
+});
+
+test("snippetLineSpan finds a multi-line match", () => {
+  const text = 'if store.run(rid)["status"] == "approved":\n        pass\n';
+  assert.deepEqual(snippetLineSpan(text, GOOD_FIX.old_snippet), { startLine: 1, endLine: 2 });
+});
+
+test("snippetLineSpan returns null for a mid-line match (no clean suggestion)", () => {
+  assert.equal(snippetLineSpan("abc\ndef\n", "bc"), null, "starts mid-line");
+  assert.equal(snippetLineSpan("abc\ndef\n", "ab"), null, "ends mid-line");
+  assert.equal(snippetLineSpan("abc\ndef\n", "not there"), null);
+});
+
+test("a verified fix whose snippet aligns to whole lines gets a suggestion span and head_sha", () => {
+  const { tmp, env } = setup();
+  try {
+    fs.mkdirSync(path.join(tmp, "svc"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "svc", "apply.py"), 'if store.run(rid)["status"] == "approved":\n        pass\n');
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: tmp, env: gitEnv });
+    execFileSync("git", ["add", "-A"], { cwd: tmp, env: gitEnv });
+    execFileSync("git", ["commit", "-qm", "x"], { cwd: tmp, env: gitEnv });
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: tmp, encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(tmp, "change.patch"), DIFF, "utf8");
+    const [code, rj] = runReview(tmp, env, [GOOD_FINDING], GOOD_FIX, {}, ["--ci"]);
+    assert.equal(code, 2, JSON.stringify(rj));
+    assert.equal(rj.head_sha, headSha);
+    assert.deepEqual([rj.fix.suggestion_start_line, rj.fix.suggestion_line], [1, 2]);
+  } finally { teardown(tmp); }
+});
+
+test("a verified fix whose snippet is a mid-line substring gets no suggestion span", () => {
+  const { tmp, env } = setup();
+  try {
+    fs.mkdirSync(path.join(tmp, "svc"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "svc", "apply.py"), 'if store.run(rid)["status"] == "approved":\n        pass\n');
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: tmp, env: gitEnv });
+    execFileSync("git", ["add", "-A"], { cwd: tmp, env: gitEnv });
+    execFileSync("git", ["commit", "-qm", "x"], { cwd: tmp, env: gitEnv });
+    fs.writeFileSync(path.join(tmp, "change.patch"), DIFF, "utf8");
+    const midLineFix = { ...GOOD_FIX, old_snippet: '"status"] == "approved"', new_snippet: '"decision"] == "approve"' };
+    const [code, rj] = runReview(tmp, env, [GOOD_FINDING], midLineFix, {}, ["--ci"]);
+    assert.equal(code, 2, JSON.stringify(rj));
+    assert.ok(rj.fix, JSON.stringify(rj));
+    assert.equal(rj.fix.suggestion_line, undefined);
+    assert.equal(rj.fix.suggestion_start_line, undefined);
+  } finally { teardown(tmp); }
 });
 
 test("a CI run never auto-applies a proposed fix", () => {

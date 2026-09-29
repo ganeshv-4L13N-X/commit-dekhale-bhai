@@ -371,6 +371,19 @@ export function decide(findings) {
   return findings.some((f) => BLOCKING.has(f.severity)) ? 2 : 0;
 }
 
+/** Where old_snippet sits in text, as 1-based whole-line numbers, or null if the match does not
+    start/end on a line boundary - no clean GitHub suggestion is possible for a mid-line splice. */
+export function snippetLineSpan(text, snippet) {
+  const idx = text.indexOf(snippet);
+  if (idx < 0) return null;
+  if (idx !== 0 && text[idx - 1] !== "\n") return null;
+  const endIdx = idx + snippet.length;
+  if (endIdx !== text.length && text[endIdx] !== "\n") return null;
+  const startLine = text.slice(0, idx).split("\n").length;
+  const endLine = startLine + snippet.split("\n").length - 1;
+  return { startLine, endLine };
+}
+
 export function toMarkdown(summary, kept, dropped, fix, fixDropReason, meta, ciMode) {
   const icon = { blocker: "\u{1F6D1}", major: "⚠️", minor: "ℹ️", nit: "·" };
   const lines = [`### Agent review: ${decide(kept) ? "BLOCKING" : "no blocking findings"}`, "", summary || "", ""];
@@ -519,6 +532,14 @@ export async function main(argv) {
       (ok ? kept : dropped).push(ok ? { ...f, source: "model" } : { ...f, dropped: why });
     }
     [fix, fixDropReason] = verifyFix(raw.fix || null, args.repo, args.head, reviewable, kept);
+    if (fix) {
+      const blob = readBlob(args.repo, args.head, fix.file);
+      const span = blob !== null ? snippetLineSpan(blob, fix.old_snippet) : null;
+      if (span) {
+        fix.suggestion_line = span.endLine;
+        if (span.startLine !== span.endLine) fix.suggestion_start_line = span.startLine;
+      }
+    }
     code = decide(kept);
     tr.emit("review.done", { kept: kept.length, dropped: dropped.length, exit_code: code, cost_usd: Math.round(cost * 10_000) / 10_000 });
   } catch (e) {
@@ -531,11 +552,18 @@ export async function main(argv) {
 
   const fixDecision = await decideFix(fix, args);
 
+  // Needed as the review comment's commit_id when posting fix as a GitHub suggestion - the
+  // concrete sha of the tree old_snippet was actually matched against, never a ref name.
+  let headSha = null;
+  try {
+    headSha = execFileSync("git", ["rev-parse", args.head], { cwd: args.repo, encoding: "utf8" }).trim();
+  } catch { /* leave null; the workflow step gates on its presence */ }
+
   const meta = `${Object.keys(reviewable).length} files ` +
     `· ${turns} turns · $${cost.toFixed(3)} · ${Math.round((Date.now() - t0) / 1000)}s · trace ${path.basename(tr.path)}`;
   fs.writeFileSync(path.join(out, "review.json"), JSON.stringify({
     summary, exit_code: code, findings: kept, dropped, fix, fix_drop_reason: fixDropReason,
-    fix_decision: fixDecision, cost_usd: cost, turns,
+    fix_decision: fixDecision, cost_usd: cost, turns, head_sha: headSha,
   }, null, 2), "utf8");
   const md = toMarkdown(summary, kept, dropped, fix, fixDropReason, meta, args.ci);
   fs.writeFileSync(path.join(out, "review.md"), md, "utf8");
