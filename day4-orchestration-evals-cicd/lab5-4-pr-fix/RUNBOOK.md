@@ -91,7 +91,7 @@ itself, so nothing can apply a fix by skipping this prompt.
 |---|---|---|---|
 | `changes` | `pull_request` | — | decides if Day 4 files changed |
 | `propose-fix` | `pull_request`, same-repo only | gateway secrets | runs `review-fix.mjs --ci`, uploads `pr-fix` artifact — **no write token** |
-| `comment-fix` | after `propose-fix` | `pull-requests: write` | posts `review.md` — never checks out PR code |
+| `comment-fix` | after `propose-fix` | `pull-requests: write` | posts `review.md`, plus (best effort) a native suggestion review comment — never checks out PR code |
 | `apply-fix-command` | `issue_comment` on a PR | `contents: write`, `pull-requests: write` | runs trusted `apply-fix.mjs` against the PR's current head, pushes |
 
 Trust shape: `propose-fix`/`apply-fix-command` always run `review-fix.mjs`/
@@ -117,6 +117,7 @@ status check on the protected branch.
 | `/apply-fix` comment does nothing, no error visible on the PR | commenter isn't `OWNER`/`MEMBER`/`COLLABORATOR`, or the comment isn't on a PR | check the workflow run log for the `::warning::` from the gate step |
 | Diff rejected as "too large for automated review" | diff exceeds `REVIEW_MAX_DIFF_BYTES` (60 KB default) | split the PR, or raise `REVIEW_MAX_DIFF_BYTES` deliberately (it's a cost/context guard, not a hard limit) |
 | A secret shows up masked as `[REDACTED]` in `review.md`/`prompt.txt` | working as intended — `SECRET_PATTERNS` masked it before it reached the model | if it's a false positive, treat as a lab bug to report, not something to bypass |
+| The issue comment with the proposed fix posted, but no native "Commit suggestion" review comment appeared | the fix's `old_snippet` didn't align to whole lines (`snippetLineSpan` returned null) — expected, not a bug | use `/apply-fix` instead; it doesn't need line alignment |
 
 ## What NOT to do
 
